@@ -249,12 +249,15 @@ impl RuntimeHost {
     }
 
     fn matches_log_signature(&self, log: &Log) -> bool {
+        println!("LOG: {:?}", log.topics);
         if log.topics.is_empty() {
             return false;
         }
         let signature = log.topics[0];
-
+        println!("Event handlers!: {:?}", &self.data_source_event_handlers);
         self.data_source_event_handlers.iter().any(|event_handler| {
+            println!("handler event Sig!: {:?}", &event_handler);
+            println!("on chain signature: {:?}", &signature);
             signature == util::ethereum::string_to_h256(event_handler.event.as_str())
         })
     }

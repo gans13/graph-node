@@ -181,13 +181,14 @@ impl SubgraphInstanceManager {
                         .transaction_receipts
                         .iter()
                         .flat_map(|receipt| {
+                            println!("Receipt: {:?}", receipt.logs);
                             receipt.logs.iter().filter(|log| instance.matches_log(&log))
                         })
                         .cloned()
                         .collect();
 
                     if logs.len() == 0 {
-                        debug!(logger, "No events found in this block for this subgraph");
+                        debug!(logger, "None events found in this block for this subgraph");
                     } else if logs.len() == 1 {
                         info!(logger, "1 event found in this block for this subgraph");
                     } else {

@@ -79,6 +79,7 @@ impl ToAscObj<AscEnum<EthereumValueKind>> for ethabi::Token {
             Bool(b) => *b as u64,
             String(string) => heap.asc_new(&**string).to_payload(),
             FixedArray(tokens) | Array(tokens) => heap.asc_new(&**tokens).to_payload(),
+            Tuple(tokens) => heap.asc_new(&**tokens).to_payload(),
         };
 
         AscEnum {
@@ -129,6 +130,10 @@ impl FromAscObj<AscEnum<EthereumValueKind>> for ethabi::Token {
             EthereumValueKind::Array => {
                 let ptr: AscEnumArray<EthereumValueKind> = AscPtr::from(payload);
                 Token::Array(heap.asc_get(ptr))
+            }
+            EthereumValueKind::Tuple=> {
+                let ptr: AscEnumArray<EthereumValueKind> = AscPtr::from(payload);
+                Token::Tuple(heap.asc_get(ptr))
             }
         }
     }
