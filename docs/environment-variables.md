@@ -28,10 +28,13 @@ parallel for block retrieval (defaults to 64)
   unset or set to `false` to leave block ingestion enabled.
 * `ETHEREUM_BLOCK_BATCH_SIZE`: number of Ethereum blocks to request in parallel
   (defaults to 50)
-* `ETHEREUM_BLOCK_RANGE_SIZE` - number of blocks to scan for events in each
+* `ETHEREUM_BLOCK_RANGE_SIZE`: number of blocks to scan for events in each
   request (defaults to 10000).
 * `ETHEREUM_PARALLEL_BLOCK_RANGES` - Maximum number of parallel `eth_getLogs`
   calls to make when scanning logs for a subgraph. Defaults to 100.
+* `ETHEREUM_START_BLOCK`: the block number at which subgraphs should start
+  indexing (defaults to the genesis block). Can save some time while debugging
+  subgraphs locally.
 
 ## Running mapping handlers
 
