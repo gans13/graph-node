@@ -353,14 +353,15 @@ impl RuntimeHost {
         source_address_matches && self.handler_for_block(block_trigger_type).is_ok()
     }
 
-    fn handler_for_log(&self, log: &Arc<Log>) -> Result<MappingEventHandler, Error> {
+    fn handlers_for_log(&self, log: &Arc<Log>) -> Result<Vec<MappingEventHandler>, Error> {
         // Get signature from the log
         let topic0 = match log.topics.iter().next() {
             Some(topic0) => topic0,
             None => return Err(format_err!("Ethereum event has no topics")),
         };
 
-        self.data_source_event_handlers
+        let handlers = self
+            .data_source_event_handlers
             .as_ref()
             .ok_or_else(|| {
                 format_err!(
@@ -369,14 +370,18 @@ impl RuntimeHost {
                 )
             })?
             .iter()
-            .find(|handler| *topic0 == handler.topic0())
+            .filter(|handler| *topic0 == handler.topic0())
             .cloned()
-            .ok_or_else(|| {
-                format_err!(
-                    "No event handler found for event in data source \"{}\"",
-                    self.data_source_name,
-                )
-            })
+            .collect::<Vec<_>>();
+
+        if !handlers.is_empty() {
+            Ok(handlers)
+        } else {
+            Err(format_err!(
+                "No event handler found for event in data source \"{}\"",
+                self.data_source_name,
+            ))
+        }
     }
 
     fn handler_for_call(&self, call: &Arc<EthereumCall>) -> Result<MappingCallHandler, Error> {
@@ -684,103 +689,107 @@ impl RuntimeHostTrait for RuntimeHost {
         log: Arc<Log>,
         state: BlockState,
     ) -> Box<Future<Item = BlockState, Error = Error> + Send> {
-        // Identify event handler for this log
-        let event_handler = match self.handler_for_log(&log) {
-            Ok(handler) => handler,
-            Err(e) => return Box::new(future::err(e)),
-        };
-
-        // Identify the event ABI in the contract
-        let event_abi = match util::ethereum::contract_event_with_signature(
-            &self.data_source_contract_abi.contract,
-            event_handler.event.as_str(),
-        ) {
-            Some(event_abi) => event_abi,
-            None => {
-                return Box::new(future::err(format_err!(
-                    "Event with the signature \"{}\" not found in \
-                     contract \"{}\" of data source \"{}\"",
-                    event_handler.event,
-                    self.data_source_contract_abi.name,
-                    self.data_source_name
-                )));
-            }
-        };
-
-        // Parse the log into an event
-        let params = match event_abi.parse_log(RawLog {
-            topics: log.topics.clone(),
-            data: log.data.clone().0,
-        }) {
-            Ok(log) => log.params,
-            Err(e) => {
-                return Box::new(future::err(format_err!(
-                    "Failed to parse parameters of event: {}: {}",
-                    event_handler.event,
-                    e
-                )));
-            }
-        };
-
-        debug!(
-            logger, "Start processing Ethereum event";
-            "signature" => &event_handler.event,
-            "handler" => &event_handler.handler,
-            "data_source" => &self.data_source_name,
-            "address" => format!("{}", &log.address),
-        );
-
-        // Call the event handler and asynchronously wait for the result
-        let (result_sender, result_receiver) = oneshot::channel();
-
-        let before_event_signature = event_handler.event.clone();
-        let event_signature = event_handler.event.clone();
-        let start_time = Instant::now();
+        let data_source_name = self.data_source_name.clone();
+        let abi_name = self.data_source_contract_abi.name.clone();
+        let contract = self.data_source_contract_abi.contract.clone();
+        let mapping_request_sender = self.mapping_request_sender.clone();
 
         Box::new(
-            self.mapping_request_sender
-                .clone()
-                .send(MappingRequest {
-                    logger: logger.clone(),
-                    block: block.clone(),
-                    trigger: MappingTrigger::Log {
-                        transaction: transaction.clone(),
-                        log: log.clone(),
-                        params,
-                        handler: event_handler.clone(),
-                    },
-                    state,
-                    result_sender,
-                })
-                .map_err(move |_| {
-                    format_err!(
-                        "Mapping terminated before passing in Ethereum event: {}",
-                        before_event_signature
-                    )
-                })
-                .and_then(|_| {
-                    result_receiver.map_err(move |_| {
-                        format_err!(
-                            "Mapping terminated before finishing to handle \
-                             Ethereum event: {}",
-                            event_signature,
-                        )
-                    })
-                })
-                .and_then(move |(result, send_time)| {
-                    info!(
-                        logger, "Done processing Ethereum event";
+            future::result(self.handlers_for_log(&log)).and_then(move |event_handlers| {
+                stream::iter_ok(event_handlers).fold(state, move |state, event_handler| {
+                    // Identify the event ABI in the contract
+                    let event_abi = match util::ethereum::contract_event_with_signature(
+                        &contract,
+                        event_handler.event.as_str(),
+                    ) {
+                        Some(event_abi) => event_abi,
+                        None => {
+                            return future::err(format_err!(
+                                "Event with the signature \"{}\" not found in \
+                                 contract \"{}\" of data source \"{}\"",
+                                event_handler.event,
+                                abi_name,
+                                data_source_name
+                            ));
+                        }
+                    };
+
+                    // Parse the log into an event
+                    let params = match event_abi.parse_log(RawLog {
+                        topics: log.topics.clone(),
+                        data: log.data.clone().0,
+                    }) {
+                        Ok(log) => log.params,
+                        Err(e) => {
+                            return future::err(format_err!(
+                                "Failed to parse parameters of event: {}: {}",
+                                event_handler.event,
+                                e
+                            ));
+                        }
+                    };
+
+                    debug!(
+                        logger, "Start processing Ethereum event";
                         "signature" => &event_handler.event,
                         "handler" => &event_handler.handler,
-                        "total_ms" => start_time.elapsed().as_millis(),
-
-                        // How much time the result spent in the channel,
-                        // waiting in the tokio threadpool queue. Anything
-                        // larger than 0 is bad here. The `.wait()` is instant.
-                        "waiting_ms" => send_time.wait().unwrap().elapsed().as_millis(),
+                        "data_source" => &data_source_name,
+                        "address" => format!("{}", &log.address),
                     );
-                    result
-                }),
+
+                    // Call the event handler and asynchronously wait for the result
+                    let (result_sender, result_receiver) = oneshot::channel();
+
+                    let before_event_signature = event_handler.event.clone();
+                    let event_signature = event_handler.event.clone();
+                    let start_time = Instant::now();
+
+                    mapping_request_sender
+                        .clone()
+                        .send(MappingRequest {
+                            logger: logger.clone(),
+                            block: block.clone(),
+                            trigger: MappingTrigger::Log {
+                                transaction: transaction.clone(),
+                                log: log.clone(),
+                                params,
+                                handler: event_handler.clone(),
+                            },
+                            state,
+                            result_sender,
+                        })
+                        .map_err(move |_| {
+                            format_err!(
+                                "Mapping terminated before passing in Ethereum event: {}",
+                                before_event_signature
+                            )
+                        })
+                        .and_then(|_| {
+                            result_receiver.map_err(move |_| {
+                                format_err!(
+                                    "Mapping terminated before finishing to handle \
+                                     Ethereum event: {}",
+                                    event_signature,
+                                )
+                            })
+                        })
+                        .and_then(move |(result, send_time)| {
+                            info!(
+                                logger, "Done processing Ethereum event";
+                                "signature" => &event_handler.event,
+                                "handler" => &event_handler.handler,
+                                "total_ms" => start_time.elapsed().as_millis(),
+
+                                // How much time the result spent in the channel,
+                                // waiting in the tokio threadpool queue. Anything
+                                // larger than 0 is bad here. The `.wait()` is instant.
+                                "waiting_ms" => send_time.wait().unwrap().elapsed().as_millis(),
+                            );
+
+                            future::result(result)
+                        })
+                })
+            }),
         )
     }
 }
